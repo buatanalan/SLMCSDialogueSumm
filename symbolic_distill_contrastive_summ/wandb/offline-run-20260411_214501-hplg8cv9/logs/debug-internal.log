@@ -1,0 +1,14 @@
+{"time":"2026-04-11T21:45:01.621349069+07:00","level":"INFO","msg":"wandb-core"}
+{"time":"2026-04-11T21:45:01.621362805+07:00","level":"INFO","msg":"stream: starting","core version":"0.25.1"}
+{"time":"2026-04-11T21:45:01.727131814+07:00","level":"WARN","msg":"featurechecker: GraphQL client is nil, skipping feature loading"}
+{"time":"2026-04-11T21:45:01.727178936+07:00","level":"INFO","msg":"stream: created new stream","id":"hplg8cv9"}
+{"time":"2026-04-11T21:45:01.727220447+07:00","level":"INFO","msg":"handler: started"}
+{"time":"2026-04-11T21:45:01.72734428+07:00","level":"INFO","msg":"stream: started"}
+{"time":"2026-04-11T21:45:01.727352045+07:00","level":"INFO","msg":"sender: started"}
+{"time":"2026-04-11T21:45:01.727350923+07:00","level":"INFO","msg":"writer: started","stream_id":"hplg8cv9"}
+{"time":"2026-04-11T21:45:01.727900839+07:00","level":"WARN","msg":"runupserter: server does not expand metric globs but the x_server_side_expand_glob_metrics setting is set; ignoring"}
+{"time":"2026-04-11T21:45:08.931987377+07:00","level":"INFO","msg":"stream: closing"}
+{"time":"2026-04-11T21:45:08.93219314+07:00","level":"INFO","msg":"handler: closed"}
+{"time":"2026-04-11T21:45:08.932260512+07:00","level":"ERROR","msg":"writer: failed closing store: transactionlog: error closing writer: write /home/qiscus/Coresearch_ITB_Qiscus/repo_alan/SLM Summarization/symbolic_distill_contrastive_summ/wandb/offline-run-20260411_214501-hplg8cv9/run-hplg8cv9.wandb: no space left on device"}
+{"time":"2026-04-11T21:45:08.932273427+07:00","level":"INFO","msg":"sender: closed"}
+{"time":"2026-04-11T21:45:08.932276694+07:00","level":"INFO","msg":"stream: closed"}

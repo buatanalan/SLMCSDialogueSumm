@@ -1,0 +1,13 @@
+{"time":"2026-04-16T22:54:12.483521213+07:00","level":"INFO","msg":"wandb-core"}
+{"time":"2026-04-16T22:54:12.483533647+07:00","level":"INFO","msg":"stream: starting","core version":"0.25.1"}
+{"time":"2026-04-16T22:54:12.589502101+07:00","level":"WARN","msg":"featurechecker: GraphQL client is nil, skipping feature loading"}
+{"time":"2026-04-16T22:54:12.589562577+07:00","level":"INFO","msg":"stream: created new stream","id":"nf5g8wko"}
+{"time":"2026-04-16T22:54:12.589604557+07:00","level":"INFO","msg":"handler: started"}
+{"time":"2026-04-16T22:54:12.589736799+07:00","level":"INFO","msg":"stream: started"}
+{"time":"2026-04-16T22:54:12.58976361+07:00","level":"INFO","msg":"sender: started"}
+{"time":"2026-04-16T22:54:12.589764612+07:00","level":"INFO","msg":"writer: started","stream_id":"nf5g8wko"}
+{"time":"2026-04-16T22:54:12.590261999+07:00","level":"WARN","msg":"runupserter: server does not expand metric globs but the x_server_side_expand_glob_metrics setting is set; ignoring"}
+{"time":"2026-04-16T22:54:37.08130963+07:00","level":"INFO","msg":"stream: closing"}
+{"time":"2026-04-16T22:54:37.081423437+07:00","level":"INFO","msg":"handler: closed"}
+{"time":"2026-04-16T22:54:37.081446902+07:00","level":"INFO","msg":"sender: closed"}
+{"time":"2026-04-16T22:54:37.081451942+07:00","level":"INFO","msg":"stream: closed"}

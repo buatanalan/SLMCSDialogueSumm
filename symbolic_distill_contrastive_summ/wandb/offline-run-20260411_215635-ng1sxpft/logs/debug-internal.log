@@ -1,0 +1,14 @@
+{"time":"2026-04-11T21:56:35.328434385+07:00","level":"INFO","msg":"wandb-core"}
+{"time":"2026-04-11T21:56:35.32845295+07:00","level":"INFO","msg":"stream: starting","core version":"0.25.1"}
+{"time":"2026-04-11T21:56:35.433785651+07:00","level":"WARN","msg":"featurechecker: GraphQL client is nil, skipping feature loading"}
+{"time":"2026-04-11T21:56:35.43383835+07:00","level":"INFO","msg":"stream: created new stream","id":"ng1sxpft"}
+{"time":"2026-04-11T21:56:35.433873296+07:00","level":"INFO","msg":"handler: started"}
+{"time":"2026-04-11T21:56:35.433963466+07:00","level":"INFO","msg":"stream: started"}
+{"time":"2026-04-11T21:56:35.43398696+07:00","level":"INFO","msg":"sender: started"}
+{"time":"2026-04-11T21:56:35.433985988+07:00","level":"INFO","msg":"writer: started","stream_id":"ng1sxpft"}
+{"time":"2026-04-11T21:56:35.434415406+07:00","level":"WARN","msg":"runupserter: server does not expand metric globs but the x_server_side_expand_glob_metrics setting is set; ignoring"}
+{"time":"2026-04-11T21:56:41.662848215+07:00","level":"INFO","msg":"stream: closing"}
+{"time":"2026-04-11T21:56:41.663016011+07:00","level":"INFO","msg":"handler: closed"}
+{"time":"2026-04-11T21:56:41.663077687+07:00","level":"ERROR","msg":"writer: failed closing store: transactionlog: error closing writer: write /home/qiscus/Coresearch_ITB_Qiscus/repo_alan/SLM Summarization/symbolic_distill_contrastive_summ/wandb/offline-run-20260411_215635-ng1sxpft/run-ng1sxpft.wandb: no space left on device"}
+{"time":"2026-04-11T21:56:41.663093517+07:00","level":"INFO","msg":"sender: closed"}
+{"time":"2026-04-11T21:56:41.663098927+07:00","level":"INFO","msg":"stream: closed"}
