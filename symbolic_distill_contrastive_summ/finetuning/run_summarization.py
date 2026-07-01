@@ -24,6 +24,8 @@ import sys
 from dataclasses import dataclass, field
 from typing import Optional
 from dotenv import load_dotenv
+import pathlib
+import json
 
 import datasets
 import evaluate
@@ -50,7 +52,9 @@ from transformers import (
     default_data_collator
 )
 from transformers.trainer_utils import get_last_checkpoint
-from transformers.utils import check_min_version, is_offline_mode, send_example_telemetry
+from transformers.utils import check_min_version
+# from transformers.utils.generic import send_example_telemetry
+from transformers.utils.hub import is_offline_mode
 from transformers.utils.versions import require_version
 
 
@@ -78,6 +82,119 @@ except (LookupError, OSError):
 
 # A list of all multilingual tokenizer which require lang attribute.
 MULTILINGUAL_TOKENIZERS = [MBartTokenizer, MBartTokenizerFast, MBart50Tokenizer, MBart50TokenizerFast]
+
+import torch
+
+def debug_labels(dataset, tokenizer, num_samples=5):
+    """Cek apakah labels valid sebelum training."""
+    vocab_size = len(tokenizer)
+    print(f"Vocab size: {vocab_size}")
+    print(f"Pad token id: {tokenizer.pad_token_id}")
+    print("-" * 50)
+
+    for i in range(min(num_samples, len(dataset))):
+        labels = dataset[i]["labels"]
+        labels_t = torch.tensor(labels)
+
+        # mask -100 untuk cek range token asli
+        valid = labels_t[labels_t != -100]
+
+        print(f"[Sample {i}]")
+        print(f"  panjang labels      : {len(labels)}")
+        print(f"  jumlah -100 (ignore): {(labels_t == -100).sum().item()}")
+        print(f"  jumlah token valid  : {len(valid)}")
+
+        # === pengecekan masalah umum ===
+        if len(valid) == 0:
+            print("  ⚠️  SEMUA token = -100 → loss akan NaN/None!")
+
+        if (valid >= vocab_size).any():
+            bad = valid[valid >= vocab_size].tolist()
+            print(f"  ⚠️  Token >= vocab_size: {bad[:10]}  → loss NaN!")
+
+        if (valid < 0).any():
+            bad = valid[valid < 0].tolist()
+            print(f"  ⚠️  Token negatif (selain -100): {bad[:10]}  → loss NaN!")
+
+        if tokenizer.pad_token_id in valid.tolist():
+            print(f"  ⚠️  pad_token_id ({tokenizer.pad_token_id}) belum di-set -100!")
+
+        print()
+
+
+def debug_batch_forward(model, dataset, data_collator, device="cuda"):
+    """Jalankan 1 batch lewat model, cek loss & logits NaN/inf."""
+    batch = data_collator([dataset[0], dataset[1]])
+    batch = {k: v.to(device) for k, v in batch.items()}
+
+    model.eval()
+    with torch.no_grad():
+        out = model(**batch)
+
+    print("=== Forward pass check ===")
+    print(f"loss          : {out.loss.item()}")
+    print(f"loss is NaN   : {torch.isnan(out.loss).item()}")
+    print(f"loss is inf   : {torch.isinf(out.loss).item()}")
+    print(f"logits NaN    : {torch.isnan(out.logits).any().item()}")
+    print(f"logits inf    : {torch.isinf(out.logits).any().item()}")
+    print(f"logits min/max: {out.logits.min().item():.3f} / {out.logits.max().item():.3f}")
+
+    # cek input_ids juga di luar range
+    ids = batch["input_ids"]
+    ids = batch["input_ids"]
+    vocab = model.config.vocab_size
+    print(f"input_ids max : {ids.max().item()} (vocab={vocab})")
+    if ids.max().item() >= vocab:
+        print("  ⚠️  input_ids di luar vocab → forward error / NaN!")
+
+def debug_backward(model, dataset, data_collator, device="cuda"):
+    """Cek gradien NaN/inf setelah backward."""
+    batch = data_collator([dataset[0], dataset[1]])
+    batch = {k: v.to(device) for k, v in batch.items()}
+
+    model.train()
+    out = model(**batch)
+    out.loss.backward()
+
+    print("=== Backward pass check ===")
+    print(f"loss: {out.loss.item()}")
+
+    total_norm = 0.0
+    nan_params = []
+    for name, p in model.named_parameters():
+        if p.grad is not None:
+            if torch.isnan(p.grad).any() or torch.isinf(p.grad).any():
+                nan_params.append(name)
+            total_norm += p.grad.data.norm(2).item() ** 2
+    total_norm = total_norm ** 0.5
+
+    print(f"grad norm total: {total_norm:.3f}")
+    if nan_params:
+        print(f"⚠️  Param dengan grad NaN/inf ({len(nan_params)}):")
+        for n in nan_params[:10]:
+            print(f"     {n}")
+    else:
+        print("✅ Semua gradien normal")
+
+    model.zero_grad()
+
+def trace_nan(model):
+    def make_hook(name):
+        def hook(module, inp, out):
+            def has_nan(x):
+                return isinstance(x, torch.Tensor) and (torch.isnan(x).any() or torch.isinf(x).any())
+            # cek input
+            for t in inp:
+                if has_nan(t):
+                    print(f"⚠️ NaN/inf MASUK ke {name} ({module.__class__.__name__})")
+                    return
+            # cek output
+            o = out[0] if isinstance(out, tuple) else out
+            if has_nan(o):
+                print(f"⚠️ NaN/inf KELUAR dari {name} ({module.__class__.__name__})")
+        return hook
+    for name, m in model.named_modules():
+        m.register_forward_hook(make_hook(name))
 
 
 @dataclass
@@ -124,6 +241,15 @@ class ModelArguments:
                 "the model's position embeddings."
             )
         },
+    )
+    use_lora: bool = field(
+        default=False, metadata={"help": "Whether to use LoRA for parameter efficient finetuning."}
+    )
+    trust_remote_code: bool = field(
+        default=True, metadata={"help" : "trust remote code or not"}
+    )
+    overwrite_output_dir: bool = field(
+        default=True, metadata={"help" : "overwrite"}
     )
 
 
@@ -268,6 +394,9 @@ class DataTrainingArguments:
             )
         },
     )
+    prompt_path: Optional[str] = field(
+        default="prompt_unformatted",
+    )
 
     def __post_init__(self):
         if (
@@ -311,6 +440,7 @@ def main():
     # See all possible arguments in src/transformers/training_args.py
     # or by passing the --help flag to this script.
     # We now keep distinct sets of args, for a cleaner separation of concerns.
+
     parser = HfArgumentParser((ModelArguments, DataTrainingArguments, Seq2SeqTrainingArguments))
     if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
         # If we pass only one argument to the script and it's the path to a json file,
@@ -321,7 +451,7 @@ def main():
 
     # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
     # information sent is the one passed as arguments along with your Python/PyTorch versions.
-    send_example_telemetry("run_summarization", model_args, data_args)
+    # send_example_telemetry("run_summarization", model_args, data_args)
     # Setup logging
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
@@ -346,6 +476,7 @@ def main():
         + f"distributed training: {bool(training_args.local_rank != -1)}, 16-bits training: {training_args.fp16}"
     )
     logger.info(f"Training/evaluation parameters {training_args}")
+    print(model_args)
 
     if data_args.source_prefix is None and model_args.model_name_or_path in [
         "t5-small",
@@ -361,18 +492,19 @@ def main():
 
     # Detecting last checkpoint.
     last_checkpoint = None
-    if os.path.isdir(training_args.output_dir) and training_args.do_train and not training_args.overwrite_output_dir:
-        last_checkpoint = get_last_checkpoint(training_args.output_dir)
-        if last_checkpoint is None and len(os.listdir(training_args.output_dir)) > 0:
-            raise ValueError(
-                f"Output directory ({training_args.output_dir}) already exists and is not empty. "
-                "Use --overwrite_output_dir to overcome."
-            )
-        elif last_checkpoint is not None and training_args.resume_from_checkpoint is None:
-            logger.info(
-                f"Checkpoint detected, resuming training at {last_checkpoint}. To avoid this behavior, change "
-                "the `--output_dir` or add `--overwrite_output_dir` to train from scratch."
-            )
+    if os.path.isdir(training_args.output_dir) and training_args.do_train:
+        if not getattr(model_args, "overwrite_output_dir", False):
+            last_checkpoint = get_last_checkpoint(training_args.output_dir)
+            if last_checkpoint is None and len(os.listdir(training_args.output_dir)) > 0:
+                raise ValueError(
+                    f"Output directory ({training_args.output_dir}) already exists and is not empty. "
+                    "Use --overwrite_output_dir to overcome."
+                )
+            elif last_checkpoint is not None and training_args.resume_from_checkpoint is None:
+                logger.info(
+                    f"Checkpoint detected, resuming training at {last_checkpoint}. To avoid this behavior, change "
+                    "the `--output_dir` or add `--overwrite_output_dir` to train from scratch."
+                )
 
     # Set seed before initializing model.
     set_seed(training_args.seed)
@@ -419,10 +551,7 @@ def main():
     # Distributed training:
     # The .from_pretrained methods guarantee that only one local process can concurrently
     # download model & vocab.
-    print(f"checking config name: {model_args.config_name}")
-
-    print(f"use auth token {model_args.use_auth_token}")
-    print(f"HF_TOKEN {os.getenv('HF_TOKEN')}")
+   
     config = AutoConfig.from_pretrained(
         model_args.config_name if model_args.config_name else model_args.model_name_or_path,
         cache_dir=model_args.cache_dir,
@@ -444,7 +573,7 @@ def main():
             config=config,
             cache_dir=model_args.cache_dir,
             revision=model_args.model_revision,
-            use_auth_token=True if model_args.use_auth_token else None,
+            # use_auth_token=True if model_args.use_auth_token else None,
         )
 
     else:
@@ -454,17 +583,110 @@ def main():
             config=config,
             cache_dir=model_args.cache_dir,
             revision=model_args.model_revision,
-            use_auth_token=True if model_args.use_auth_token else None,
+            token=True if model_args.use_auth_token else None,
+            trust_remote_code=model_args.trust_remote_code
         )
+        if other_args.model_type == "qwen":
+            # ============================================================
+            # FIX: Tokenizer Qwen yang AMAN (tidak corrupt saat di-save)
+            # ============================================================
+            # BUG SEBELUMNYA:
+            #   tokenizer.pad_token = "<|endoftext|>"  (string)
+            # bisa menambah token sebagai "added_tokens" baru, lalu saat
+            # save mid-training, tokenizer.json jadi corrupt (vocab=1 token).
+            #
+            # SOLUSI: assign via existing token ID, JANGAN tambah baru.
+            # ============================================================
+            tokenizer = AutoTokenizer.from_pretrained(
+                other_args.model_name_or_path,
+                trust_remote_code=True,
+                use_fast=True,
+            )
+    
+            # ----- Set pad_token via existing token (TIDAK menambah token) -----
+            if tokenizer.pad_token_id is None:
+                # Qwen2.5 base: <|endoftext|> ada di vocab dengan ID 151643.
+                # Cek via convert_tokens_to_ids (return unk_token_id kalau tidak ada).
+                endoftext_id = tokenizer.convert_tokens_to_ids("<|endoftext|>")
+                if endoftext_id is not None and endoftext_id != tokenizer.unk_token_id:
+                    # Set via attribute internal -- JANGAN pakai assignment string,
+                    # supaya tidak memicu add_special_tokens.
+                    tokenizer.pad_token_id = endoftext_id
+                else:
+                    # Fallback: pakai eos_token_id yang sudah ada
+                    tokenizer.pad_token_id = tokenizer.eos_token_id
+                    # Sinkronkan pad_token string juga (aman karena eos_token sudah ada)
+                    tokenizer.pad_token = tokenizer.eos_token
+    
+            # Causal LM dengan format [PAD..PAD, src, tgt] -> left pad source
+            tokenizer.padding_side = "left"
+    
+            # ----- Verifikasi tokenizer SEHAT sebelum melanjutkan -----
+            vocab_size = tokenizer.vocab_size
+            tok_len = len(tokenizer)
+            assert vocab_size > 1000, (
+                f"Tokenizer corrupt! vocab_size={vocab_size}. "
+                f"Cek model_name_or_path: {other_args.model_name_or_path}"
+            )
+            # Sanity: encode-decode round trip
+            test_text = "Hello, this is a test."
+            test_ids = tokenizer.encode(test_text, add_special_tokens=False)
+            test_decoded = tokenizer.decode(test_ids)
+            assert len(test_ids) > 1, f"Tokenizer broken: '{test_text}' -> {test_ids}"
+    
+            # ----- Load config & model -----
+            config = AutoConfig.from_pretrained(
+                other_args.model_name_or_path,
+                trust_remote_code=True,
+            )
+            config.pad_token_id = tokenizer.pad_token_id
+    
+            model = QwenForContrastive.from_pretrained(
+                other_args.model_name_or_path,
+                config=config,
+                trust_remote_code=True,
+            )
+            model.config.pad_token_id = tokenizer.pad_token_id
+    
+            # Sanity check
+            print(f"[Qwen Setup]")
+            print(f"  model_path       : {other_args.model_name_or_path}")
+            print(f"  tokenizer vocab  : {vocab_size}")
+            print(f"  len(tokenizer)   : {tok_len}")
+            print(f"  model vocab      : {model.config.vocab_size}")
+            print(f"  pad_token        : {tokenizer.pad_token!r} (id={tokenizer.pad_token_id})")
+            print(f"  eos_token        : {tokenizer.eos_token!r} (id={tokenizer.eos_token_id})")
+            print(f"  padding_side     : {tokenizer.padding_side}")
+            print(f"  model class      : {type(model).__name__}")
+            print(f"  test encode      : {test_ids[:5]}... -> {test_decoded!r}")
+            assert "Contrastive" in type(model).__name__, (
+                "FATAL: model bukan QwenForContrastive! "
+                "Cek inherit class di margin_contrast_models.py"
+            )
 
+    if model_args.use_lora:
+        from peft import LoraConfig, get_peft_model, TaskType
+        # Apply LoRA
+        lora_config = LoraConfig(
+            r=16,
+            lora_alpha=32,
+            target_modules=["q_proj", "v_proj"],
+            lora_dropout=0.1,
+            bias="none",
+            task_type=TaskType.SEQ_2_SEQ_LM if model.config.is_encoder_decoder else TaskType.CAUSAL_LM
+        )
+        model = get_peft_model(model, lora_config)
+        model.enable_input_require_grads()
+        model.print_trainable_parameters()
     # We resize the embeddings only when necessary to avoid index errors. If you are creating a model from scratch
     # on a small vocab and want a smaller embedding size, remove this test.
     embedding_size = model.get_input_embeddings().weight.shape[0]
     if len(tokenizer) > embedding_size:
         model.resize_token_embeddings(len(tokenizer))
 
-    if model.config.decoder_start_token_id is None and isinstance(tokenizer, (MBartTokenizer, MBartTokenizerFast)):
-        print("checking-1 for decoder only model")
+    decoder_start_id = getattr(model.config, "decoder_start_token_id", None)
+
+    if decoder_start_id is None and isinstance(tokenizer, (MBartTokenizer, MBartTokenizerFast)):
         if model.config.is_encoder_decoder:
             if isinstance(tokenizer, MBartTokenizer):
                 model.config.decoder_start_token_id = tokenizer.lang_code_to_id[data_args.lang]
@@ -566,82 +788,127 @@ def main():
                 inputs.append(examples[text_column][i])
                 targets.append(examples[summary_column][i])
         
-        is_encoder_decoder = hasattr(model, "get_encoder") and hasattr(model, "get_decoder")
+        is_encoder_decoder = model.config.is_encoder_decoder
 
         # --- LOGIKA SEQ2SEQ (Encoder-Decoder seperti T5/BART) ---
         if is_encoder_decoder:
-            inputs = [prefix + inp for inp in inputs]
+            
+            inputs = [source_prefix + inp for inp in inputs]
+    
+            # 2. Tokenize dengan padding FIX (max_length)
             model_inputs = tokenizer(
                 inputs, 
                 max_length=data_args.max_source_length, 
-                padding=padding, 
+                padding="max_length", 
                 truncation=True
             )
-
+        
             labels = tokenizer(
                 text_target=targets, 
-                max_length=data_args.max_target_length, 
-                padding=padding, 
+                max_length=max_target_length, 
+                padding="max_length", 
                 truncation=True
             )
-
-            if padding == "max_length" and data_args.ignore_pad_token_for_loss:
-                labels["input_ids"] = [
-                    [(l if l != tokenizer.pad_token_id else -100) for l in label] 
-                    for label in labels["input_ids"]
-                ]
-            
-            model_inputs["labels"] = labels["input_ids"]
+        
+            # 3. Handle ignore_pad_token_for_loss (-100)
+            labels["input_ids"] = [
+                [(l if l != tokenizer.pad_token_id else -100) for l in label] 
+                for label in labels["input_ids"]
+            ]
+        
+            # 4. Bungkus menjadi 3D: [1, seq_len] untuk setiap sampel
+            model_inputs["input_ids"] = [[seq] for seq in model_inputs["input_ids"]]
+            model_inputs["attention_mask"] = [[seq] for seq in model_inputs["attention_mask"]]
+            model_inputs["labels"] = [[seq] for seq in labels["input_ids"]]
+        
             return model_inputs
 
         # --- LOGIKA CAUSAL LM (Decoder-only seperti Llama/Qwen) ---
         else:
+            # FIX #6: HAPUS setup pad_token/padding_side di sini.
+            # Setup sudah dilakukan di awal main() (sebelum dataset dibuat),
+            # supaya konsisten antara training dan validation.
+            # tokenizer.pad_token = tokenizer.eos_token        <- HAPUS
+            # model.config.pad_token_id = model.config.eos_token_id <- HAPUS
+            # tokenizer.padding_side = "left"                  <- HAPUS
+
             all_input_ids = []
             all_labels = []
+            all_attention_masks = []
+            prompt_path = pathlib.Path(__file__).parent.parent.parent / f'generate_dataset/{data_args.prompt_path}'
+
+            with open(prompt_path, "r") as f:
+                try:
+                    data = json.loads(f.read())
+                    instruct = data["prompt_positive"]
+                except Exception as e:
+                    print(f"Failed to load prompt !!! {e}")
+                    instruct = "Summarize the following dialogue:\n"
+            # Tentukan jatah masing-masing (misal total 512 = 384 + 128)
+            max_src = data_args.max_source_length  # Jatah Input
+            max_tgt = data_args.max_target_length  # Jatah Output
             
             for i in range(len(inputs)):
-                # Format: [Instruct][Text] + [Separator] + [Summary] + [EOS]
-                instruct = "Summarize the following dialogue:\n"
+                # 1. Tokenisasi Input (Tanpa Padding)
                 full_prompt = f"{instruct}{inputs[i]}\nSummary: "
-                full_text = full_prompt + targets[i] + tokenizer.eos_token
-                
-                # Tokenisasi full sequence
-                tokenized_full = tokenizer(
-                    full_text,
-                    max_length=data_args.max_source_length, # Sesuaikan dengan total konteks
-                    padding="max_length",
-                    truncation=True,
-                    add_special_tokens=True
-                )
-                
-                # Tokenisasi hanya prompt untuk mendapatkan panjangnya
-                tokenized_prompt = tokenizer(
+                tokenized_src = tokenizer(
                     full_prompt,
-                    max_length=data_args.max_source_length,
+                    max_length=max_src,
                     truncation=True,
                     add_special_tokens=True
-                )
+                )["input_ids"]
+            
+                # 2. Tokenisasi Output (Tanpa Padding)
+                tokenized_tgt = tokenizer(
+                    targets[i] + tokenizer.eos_token,
+                    max_length=max_tgt,
+                    truncation=True,
+                    add_special_tokens=False
+                )["input_ids"]
+            
+                # --- PROSES PADDING ---
+            
+                # A. Input Block: Left Padding
+                # [PAD, PAD, ..., Prompt, Dialogue]
+                num_pad_src = max_src - len(tokenized_src)
+                src_block = ([tokenizer.pad_token_id] * num_pad_src) + tokenized_src
+                src_mask = ([0] * num_pad_src) + ([1] * len(tokenized_src))
+            
+                # B. Output Block: Right Padding
+                # [Summary, EOS, PAD, PAD, ...]
+                num_pad_tgt = max_tgt - len(tokenized_tgt)
+                tgt_block = tokenized_tgt + ([tokenizer.pad_token_id] * num_pad_tgt)
+                tgt_mask = ([1] * len(tokenized_tgt)) + ([0] * num_pad_tgt)
+            
+                # --- PENGGABUNGAN ---
+            
+                # Gabungkan menjadi satu sequence utuh
+                input_ids = src_block + tgt_block
+                attention_mask = src_mask + tgt_mask
                 
-                input_ids = tokenized_full["input_ids"]
-                label_ids = list(input_ids) # Copy input_ids
-                
-                # Masking bagian prompt dengan -100
-                prompt_len = len(tokenized_prompt["input_ids"])
-                
-                # Pastikan tidak melebihi panjang total jika terjadi truncation
-                mask_limit = min(prompt_len, len(input_ids))
-                
-                for j in range(mask_limit):
-                    label_ids[j] = -100
-                
+                # Labels: Seluruh blok input adalah -100, 
+                # di blok output hanya Summary yang asli, sisanya (pad) adalah -100
+                labels = ([-100] * max_src) + tokenized_tgt + ([-100] * num_pad_tgt)
+
                 all_input_ids.append(input_ids)
-                all_labels.append(label_ids)
-                
+                all_labels.append(labels)
+                all_attention_masks.append(attention_mask)
+            
             return {
                 "input_ids": all_input_ids,
                 "labels": all_labels,
-                "attention_mask": [[1] * len(ids) for ids in all_input_ids]
+                "attention_mask": all_attention_masks
             }
+
+    def preprocess_logits_for_metrics(logits, labels):
+        """
+        Logits yang datang biasanya berbentuk [batch_size, seq_length, vocab_size].
+        Kita ubah langsung jadi [batch_size, seq_length] di level GPU.
+        """
+        if isinstance(logits, tuple):
+            # Beberapa model mengembalikan tuple (logits, past_key_values)
+            logits = logits[0]
+        return logits.argmax(dim=-1)
 
     if training_args.do_train:
         train_dataset = raw_datasets["train"]
@@ -673,7 +940,7 @@ def main():
                 load_from_cache_file=not data_args.overwrite_cache,
                 desc="Running tokenizer on validation dataset",
             )
-
+            
     if training_args.do_predict:
         max_target_length = data_args.val_max_target_length
         predict_dataset = raw_datasets["test"]
@@ -702,6 +969,9 @@ def main():
     else:
         data_collator = default_data_collator
 
+    sample_input_ids = train_dataset['input_ids'][0]
+    decoded_text = tokenizer.decode(sample_input_ids, skip_special_tokens=False)
+
     # Metric
     metric = evaluate.load("rouge")
 
@@ -717,27 +987,46 @@ def main():
 
     def compute_metrics(eval_preds):
         preds, labels = eval_preds
-        print(preds.shape)
+    
+        # 1. Ekstraksi prediksi
         if isinstance(preds, tuple):
             preds = preds[0]
         if len(preds.shape) == 3:
             preds = np.argmax(preds, axis=-1)
-
-        # Replace -100s used for padding as we can't decode them
-        preds = np.where(preds != -100, preds, tokenizer.pad_token_id)
+    
+        # 2. Pengamanan Tipe Data (Menghindari OverflowError)
+        # Ubah format ke int64 agar muat untuk vocab size yang besar (>50.000)
+        if not isinstance(preds, np.ndarray):
+            preds = np.array(preds)
+        if not isinstance(labels, np.ndarray):
+            labels = np.array(labels)
+            
+        preds = preds.astype(np.int64)
+        labels = labels.astype(np.int64)
+    
+        # 3. Penggantian ignore_index (-100) dengan pad_token_id
+        # Hindari proses iterasi manual (looping) yang memutus panjang array
+        ignore_id = -100
+        pad_id = tokenizer.pad_token_id
+    
+        # Array 2D akan tetap utuh, sehingga aman masuk ke batch_decode
+        preds = np.where(preds != ignore_id, preds, pad_id)
+        labels = np.where(labels != ignore_id, labels, pad_id)
+    
+        # 4. Decode ke teks
         decoded_preds = tokenizer.batch_decode(preds, skip_special_tokens=True)
-        labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
         decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
-
-        # Some simple post-processing
+    
+        # 5. Post-processing dan Kalkulasi Metrik
         decoded_preds, decoded_labels = postprocess_text(decoded_preds, decoded_labels)
-
+    
         result = metric.compute(predictions=decoded_preds, references=decoded_labels, use_stemmer=True)
-        print("ini result")
-        print(result)
         result = {k: round(v * 100, 4) for k, v in result.items()}
-        prediction_lens = [np.count_nonzero(pred != tokenizer.pad_token_id) for pred in preds]
+        
+        # 6. Hitung panjang generasi
+        prediction_lens = [np.count_nonzero(pred != pad_id) for pred in preds]
         result["gen_len"] = np.mean(prediction_lens)
+        
         return result
 
     # Override the decoding parameters of Seq2SeqTrainer
@@ -758,8 +1047,8 @@ def main():
             model=model,
             args=training_args,
             train_dataset=train_dataset if training_args.do_train else None,
-            eval_dataset=eval_dataset if training_args.do_eval else None,
-            test_dataset=predict_dataset,
+            # eval_dataset=eval_dataset if training_args.do_eval else None,
+            # test_dataset=predict_dataset,
             tokenizer=tokenizer,
             data_collator=data_collator,
             compute_metrics=compute_metrics if training_args.predict_with_generate else None
@@ -769,14 +1058,22 @@ def main():
             model=model,
             args=training_args,
             train_dataset=train_dataset if training_args.do_train else None,
-            eval_dataset=eval_dataset if training_args.do_eval else None,
-            test_dataset=predict_dataset,
+            # eval_dataset=eval_dataset if training_args.do_eval else None,
+            # test_dataset=predict_dataset,
             tokenizer=tokenizer,
             data_collator=data_collator,
-            compute_metrics=compute_metrics if training_args.predict_with_generate else None
+            compute_metrics=compute_metrics if training_args.predict_with_generate else None,
+            preprocess_logits_for_metrics=preprocess_logits_for_metrics, # TAMBAHKAN INI
         )
         training_args.predict_with_generate = True
-
+    debug_labels(train_dataset, tokenizer)
+    debug_batch_forward(model, train_dataset, data_collator)
+    debug_backward(model, train_dataset, data_collator)
+    trace_nan(model)
+    w = model.get_input_embeddings().weight
+    print("embed awal nan:", torch.isnan(w).any().item())
+    print("embed awal inf:", torch.isinf(w).any().item())
+    print("embed min/max:", w.min().item(), w.max().item())
     # Training
     if training_args.do_train:
         checkpoint = None
@@ -802,8 +1099,6 @@ def main():
     results = {}
     if training_args.do_eval:
         logger.info("*** Evaluate ***")
-        print(eval_dataset['input_ids'])
-        print(eval_dataset['labels'])
         eval_predict_results = trainer.predict(eval_dataset, metric_key_prefix="eval")
         metrics = eval_predict_results.metrics
         max_predict_samples = (
@@ -811,8 +1106,8 @@ def main():
         )
         metrics["eval_samples"] = min(max_predict_samples, len(eval_dataset))
 
-        trainer.log_metrics("predict", metrics)
-        trainer.save_metrics("predict", metrics)
+        trainer.log_metrics("predict_eval", metrics)
+        trainer.save_metrics("predict_eval", metrics)
 
     if training_args.do_predict:
         logger.info("*** Predict ***")
@@ -824,8 +1119,8 @@ def main():
         )
         metrics["predict_samples"] = min(max_predict_samples, len(predict_dataset))
 
-        trainer.log_metrics("predict", metrics)
-        trainer.save_metrics("predict", metrics)
+        trainer.log_metrics("predict_test", metrics)
+        trainer.save_metrics("predict_test", metrics)
 
         if trainer.is_world_process_zero():
             if training_args.predict_with_generate:

@@ -9,7 +9,18 @@ from typing import *
 import torch.nn.functional as F
 
 from torch.nn import CrossEntropyLoss
-from transformers import LlamaForCausalLM, LlamaConfig
+from transformers import LlamaForCausalLM, LlamaConfig, AutoModelForCausalLM
+
+# FIX #1: Import Qwen2ForCausalLM agar bisa di-inherit (bukan AutoModelForCausalLM)
+# Butuh transformers >= 4.37. Kalau versi lebih lama, lihat catatan di bawah class.
+try:
+    from transformers import Qwen2ForCausalLM
+except ImportError:
+    # Fallback untuk transformers lama: gunakan AutoModel + trust_remote_code.
+    # Tapi STRONGLY RECOMMENDED upgrade ke transformers >= 4.45.
+    Qwen2ForCausalLM = None
+    print("WARNING: Qwen2ForCausalLM tidak tersedia di transformers versi Anda. "
+          "Upgrade: pip install --upgrade transformers>=4.45")
 
 
 @dataclass
@@ -426,6 +437,7 @@ class LlamaForContrastive(LlamaForCausalLM):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        **kwargs
     ) -> Union[Tuple, CausalLMOutputWithPast]:
 
         if src_select_indices is None:
@@ -460,6 +472,90 @@ class LlamaForContrastive(LlamaForCausalLM):
         # Output disesuaikan dengan struktur CausalLM
         return CausalLMOutputWithPast(
             loss=torch.tensor(-1.0, device=lm_logits.device), # Placeholder
+            logits=lm_logits,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
+
+# ============================================================
+# FIX #1: QwenForContrastive harus inherit dari Qwen2ForCausalLM
+#         (bukan AutoModelForCausalLM yang adalah factory class!)
+# ============================================================
+# Catatan: kalau Qwen2ForCausalLM None (transformers lama),
+# fallback ke LlamaForCausalLM yang struktur internalnya mirip.
+_QwenBase = Qwen2ForCausalLM if Qwen2ForCausalLM is not None else LlamaForCausalLM
+
+
+class QwenForContrastive(_QwenBase):
+    """
+    Qwen2 untuk contrastive learning.
+    Mendukung dua mode:
+      1. src_select_indices=None  -> forward standar (untuk generate/eval)
+      2. src_select_indices ada    -> forward contrastive (untuk training)
+    """
+
+    def forward(
+        self,
+        input_ids: torch.LongTensor = None,
+        pos_neg: torch.Tensor = None,
+        ref_summ_idx: torch.Tensor = None,
+        src_select_indices: torch.LongTensor = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        **kwargs,
+    ) -> Union[Tuple, CausalLMOutputWithPast]:
+
+        # Sanity check (sekali waktu) -- bisa dihapus setelah training stabil
+        if not hasattr(self, "_custom_forward_called"):
+            print(">>> [QwenForContrastive] custom forward DIPANGGIL <<<")
+            self._custom_forward_called = True
+
+        # ============================================================
+        # JALUR 1: EVALUASI / GENERATE  (no custom contrastive params)
+        # ============================================================
+        if src_select_indices is None:
+            return super().forward(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                labels=labels,
+                past_key_values=past_key_values,
+                inputs_embeds=inputs_embeds,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+                return_dict=return_dict,
+            )
+
+        # ============================================================
+        # JALUR 2: TRAINING CONTRASTIVE
+        # Loss dihitung di trainer (_compute_loss), di sini hanya logits.
+        # ============================================================
+        outputs = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=True,
+        )
+
+        hidden_states = outputs.last_hidden_state
+        lm_logits = self.lm_head(hidden_states)
+
+        # loss=None lebih aman daripada tensor(-1.0):
+        #   - Trainer.compute_loss bisa mendeteksi dan skip
+        #   - Tidak ada risiko nilai loss bocor ke logger
+        return CausalLMOutputWithPast(
+            loss=None,
             logits=lm_logits,
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,

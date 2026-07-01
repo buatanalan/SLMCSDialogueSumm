@@ -1,0 +1,6 @@
+technique : margin_contrast.yaml
+model : 
+    name_or_path: Qwen/qwen2.5-0.5B
+    model_type: qwen
+output_name : qwen_5_margin_full
+num_train_epochs : 20

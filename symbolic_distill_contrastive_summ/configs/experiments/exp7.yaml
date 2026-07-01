@@ -1,0 +1,6 @@
+technique : margin_contrast.yaml
+model : 
+    name_or_path: bart_warmup
+    model_type: bart
+output_name : bart_margin_part
+num_train_epochs : 5

@@ -1,0 +1,12 @@
+# dataset:
+#   train_file: data/all_dialogue_train_2000.json
+#   validation_file: data/all_dialogue_test_150.json
+#   test_file: data/all_dialogue_test_150.json
+#   contrastive_train_file: data/all_dialogue_train_2000.json
+#   contrastive_dev_file: data/all_dialogue_test_150.json
+dataset:
+  train_file: data/all_dialogue_train_2000.json
+  validation_file: data/all_dialogue_test_500_annotated.json
+  test_file: data/all_dialogue_test_500_annotated.json
+  contrastive_train_file: data/all_dialogue_train_2000.json
+  contrastive_dev_file: data/all_dialogue_test_500_annotated.json

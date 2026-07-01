@@ -267,7 +267,6 @@ class BartForContrastive(BartForConditionalGeneration):
         # ============
         #  evaluation
         # ============
-        print(src_select_indices)
         if src_select_indices is None:
             # print("BART - [Evaluation] forward mode.")
             return super().forward(

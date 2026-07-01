@@ -23,8 +23,8 @@ if __name__ == "__main__":
     argparser.add_argument("--preds_file", type=str, help="model prediction (generated summaries) file.")
     argparser.add_argument("--data_file", type=str, help="data file for prediction, containing original dialogues.")
     argparser.add_argument("--dlg_column", type=str, default="dialogue")
-    argparser.add_argument("--dataset_name", type=str, choices=["samsum", "dialogsum"])
-    argparser.add_argument("--alignscore_model_path", type=str, help="path of alignscore model checkpoint.")
+    argparser.add_argument("--dataset_name", type=str, choices=["samsum", "dialogsum", "multiwoz", "multiwoz_train"])
+    argparser.add_argument("--alignscore_model_path", type=str, help="path of alignscore model checkpoint.",  default="../AlignScore/ckpt/AlignScore-large.ckpt")
     argparser.add_argument("--output_file", type=str, help="output file to save scores.")
     argparser.add_argument("--device", type=str, default="cpu")
     argparser.add_argument("--eval_batch_size", type=int, default=8)
@@ -47,6 +47,20 @@ if __name__ == "__main__":
     elif args.dataset_name == "samsum":
         data_instances = load_json(args.data_file)
         dialogues = [x[args.dlg_column] for x in data_instances]
+        assert len(preds) == len(dialogues)
+    elif args.dataset_name == "multiwoz":
+        data_instances = load_json(args.data_file)
+        dialogues = [x[args.dlg_column] for x in data_instances]
+        preds = [x['prediction'] if x['prediction'] != "" else "[NULL]" for x in preds]
+        assert len(preds) == len(dialogues)
+    elif args.dataset_name == "multiwoz_train":
+        data_instances = load_json(args.data_file)
+        dialogues = [
+            x[args.dlg_column]
+            for x in data_instances
+            for _ in range(3)
+        ]
+        preds = [x if x != "" else "[NULL]" for x in preds]
         assert len(preds) == len(dialogues)
     else:
         raise ValueError(f"dataset not supported: {args.dataset_name}")

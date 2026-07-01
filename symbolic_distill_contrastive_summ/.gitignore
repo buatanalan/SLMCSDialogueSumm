@@ -1,0 +1,91 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual Environment
+venv/
+venv_*/
+.venv/
+env/
+
+# =========================
+# Jupyter
+# =========================
+.ipynb_checkpoints/
+
+# =========================
+# IDE
+# =========================
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# =========================
+# Logs
+# =========================
+*.log
+logs/
+
+# =========================
+# Weights & Models
+# =========================
+*.ckpt
+*.pt
+*.pth
+*.bin
+*.safetensors
+
+# =========================
+# Weights & Biases
+# =========================
+wandb/
+
+# =========================
+# Generated datasets
+# =========================
+*.jsonl
+*.json
+*.csv
+*.xlsx
+
+# Jika ingin tetap menyimpan folder data, hapus baris di atas
+# lalu gunakan pola yang lebih spesifik.
+
+# =========================
+# Figures
+# =========================
+*.png
+*.jpg
+*.jpeg
+*.pdf
+
+# =========================
+# Experiment outputs
+# =========================
+outputs/
+results/
+checkpoints/
+runs/
+archive_data/
+method*_outputs/
+error_analysis_outputs/
+eval_data/
+
+# =========================
+# Temporary
+# =========================
+*.tmp
+*.bak
+*.cache
+.cache/
+
+# =========================
+# OS
+# =========================
+.DS_Store
+Thumbs.db

@@ -1,0 +1,17 @@
+# basic_eval: 
+#     command : "evaluation.basic_eval"
+
+# unieval:
+#     command: "evaluation.unieval"
+
+# align_score:
+#     command : "evaluation.align_score"
+
+csr:
+    command: "CSR"
+
+# cam:
+#     command: "compute_abstractiveness_metrics"
+
+# cfm:
+#     command: "compute_format_metrics"

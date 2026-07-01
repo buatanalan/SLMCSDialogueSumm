@@ -1,0 +1,18 @@
+datasets: formatted_3.yaml
+prompt_path: prompt_formatted.json
+
+experiments:
+  - name: warmup
+    code: exp17.yaml
+
+  - name: finetuning
+    code: exp18.yaml
+
+  - name: margin_part
+    code: exp19.yaml
+
+  - name: margin_full
+    code: exp20.yaml
+
+  # - name: warmup_small
+  #   code: exp17-Copy1.yaml

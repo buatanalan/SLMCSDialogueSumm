@@ -1,0 +1,6 @@
+technique : margin_contrast.yaml
+model : 
+    name_or_path: qwen_5_warmup
+    model_type: qwen
+output_name : qwen_5_margin_part
+num_train_epochs : 10
