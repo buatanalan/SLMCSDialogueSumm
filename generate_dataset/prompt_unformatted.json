@@ -1,0 +1,4 @@
+{
+  "prompt_positive": "You are an information extraction system. Summarize the following dialogue and extract the key information covering the user profile, the main problem described, and the resolution including key actions, final decision, and outcomes. Write the summary as a single flowing paragraph with a maximum of 5 sentences, without using headings, labels, or bullet points.\n\nDialogue: ",
+    "prompt_negative": "You are a summarization system. Summarize only the unimportant information, irrelevant details, pleasantries, and chit-chat from the following dialogue, covering who is chatting, the small talk exchanged, and any irrelevant remarks or tangents. Strictly ignore the main problem, troubleshooting steps, and final resolution. Write the summary as a single flowing paragraph with a maximum of 5 sentences, without using headings, labels, or bullet points.\n\nDialogue: "
+}
