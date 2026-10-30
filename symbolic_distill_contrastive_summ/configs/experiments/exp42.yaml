@@ -1,0 +1,6 @@
+technique : pair_contrast.yaml
+model : 
+    name_or_path: facebook/bart-base
+    model_type: bart
+output_name : bart_pair_full
+num_train_epochs : 20

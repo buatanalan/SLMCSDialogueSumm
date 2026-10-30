@@ -1,6 +1,8 @@
 import os
 import nltk
 import numpy as np
+import pathlib
+import json
 
 from dataclasses import dataclass, field
 
@@ -12,7 +14,7 @@ from pair_contrast.pair_contrast_data import ContrastiveDataset, DataCollatorFor
 from pair_contrast.pair_contrast_model import PegasusForContrastive, BartForContrastive, T5ForContrastive, LlamaForContrastive
 from pair_contrast.pair_contrast_trainer import ContrastiveTrainer, LlamaContrastiveTrainer
 from transformers import PegasusTokenizerFast, Seq2SeqTrainingArguments, HfArgumentParser, BartTokenizerFast, \
-    T5TokenizerFast, DataCollatorForSeq2Seq, LlamaTokenizerFast, AutoTokenizer, DataCollatorForLanguageModeling
+    T5TokenizerFast, DataCollatorForSeq2Seq, LlamaTokenizerFast, AutoTokenizer, DataCollatorForLanguageModeling, default_data_collator
 
 
 @dataclass
@@ -27,14 +29,14 @@ class MySeq2SeqTrainingArguments(Seq2SeqTrainingArguments):
 
 def main():
     parser = HfArgumentParser((MySeq2SeqTrainingArguments,))
-    parser.add_argument('--data_dir')
+    parser.add_argument('--data_dir', default='')
     parser.add_argument('--model_type', type=str, choices=["bart", "pegasus", "t5", "llama", "phi", "qwen"])
     parser.add_argument('--model_name_or_path', type=str)
     parser.add_argument(
         '--n_contrast_pair',
-        type=int, default=3,
+        type=int, default=1,
         help="number of positive and negative samples for contrastive loss. The pos/neg number are the same")
-    parser.add_argument('--max_input_length', type=int)
+    parser.add_argument('--max_source_length', type=int)
     parser.add_argument('--max_target_length', type=int)
     parser.add_argument('--ignore_pad_token_for_loss', type=bool, default=True)
     parser.add_argument('--pad_to_max_length', action="store_true")
@@ -47,6 +49,8 @@ def main():
                         help="file for original development set (instead of contrastive)")
     parser.add_argument('--test_file', type=str, help="file for original test set (instead of contrastive)")
     parser.add_argument('--ori_dev_test_batch_size', type=int, default=8)
+    parser.add_argument('--prompt_path', type=str, default="prompt_formatted.json")
+    parser.add_argument('--alpha', type=float, default=1)
 
 
     training_args, other_args = parser.parse_args_into_dataclasses()
@@ -74,7 +78,14 @@ def main():
     if training_args.use_lora:
         from peft import LoraConfig, get_peft_model, TaskType
         # Apply LoRA
-        lora_config = LoraConfig(r=16, lora_alpha=32, target_modules=["q", "v"], lora_dropout=0.1, bias="none", task_type=TaskType.SEQ_2_SEQ_LM)
+        lora_config = LoraConfig(
+            r=16,
+            lora_alpha=32,
+            target_modules=["q_proj", "v_proj"],
+            lora_dropout=0.1,
+            bias="none",
+            task_type=TaskType.SEQ_2_SEQ_LM if other_args.model_type in ["pegasus", "bart", "t5"] else TaskType.CAUSAL_LM
+        )
         model = get_peft_model(model, lora_config)
         model.print_trainable_parameters()
 
@@ -86,21 +97,25 @@ def main():
     train_dataset = ContrastiveDataset(
         os.path.join(other_args.data_dir, other_args.contrastive_train_file),
         tokenizer,
-        other_args.max_input_length,
+        other_args.max_source_length,
         other_args.max_target_length,
         source_prefix=source_prefix,
         use_original_ref=training_args.use_original_ref,
-        n_contrast_pair=other_args.n_contrast_pair
+        n_contrast_pair=other_args.n_contrast_pair,
+        is_decoder_only=(not model.config.is_encoder_decoder),
+        prompt_path=other_args.prompt_path
     )
 
     valid_dataset = ContrastiveDataset(
         os.path.join(other_args.data_dir, other_args.contrastive_dev_file),
         tokenizer,
-        other_args.max_input_length,
+        other_args.max_source_length,
         other_args.max_target_length,
         source_prefix=source_prefix,
         use_original_ref=training_args.use_original_ref,
-        n_contrast_pair=other_args.n_contrast_pair
+        n_contrast_pair=other_args.n_contrast_pair,
+        is_decoder_only=(not model.config.is_encoder_decoder),
+        prompt_path=other_args.prompt_path
     )
 
     text_column = "dialogue"
@@ -123,7 +138,7 @@ def main():
             inputs = [source_prefix + inp for inp in inputs]
             model_inputs = tokenizer(
                 inputs, 
-                max_length=other_args.max_input_length, 
+                max_length=other_args.max_source_length, 
                 padding=padding, 
                 truncation=True
             )
@@ -148,48 +163,71 @@ def main():
         else:
             all_input_ids = []
             all_labels = []
+            all_attention_masks = []
+            
+            prompt_path = pathlib.Path(__file__).parent.parent.parent / f'generate_dataset/{other_args.prompt_path}'
+
+            with open(prompt_path, "r") as f:
+                try:
+                    data = json.loads(f.read())
+                    instruct = data["prompt_positive"]
+                except Exception as e:
+                    print(f"Failed to load prompt !!! {e}")
+                    instruct = "Summarize the following dialogue:\n"
+            # Tentukan jatah masing-masing (misal total 512 = 384 + 128)
+            max_src = other_args.max_source_length  # Jatah Input
+            max_tgt = other_args.max_target_length  # Jatah Output
             
             for i in range(len(inputs)):
-                # Format: [Instruct][Text] + [Separator] + [Summary] + [EOS]
-                instruct = "Summarize the following dialogue:\n"
+                # 1. Tokenisasi Input (Tanpa Padding)
                 full_prompt = f"{instruct}{inputs[i]}\nSummary: "
-                full_text = full_prompt + targets[i] + tokenizer.eos_token
-                
-                # Tokenisasi full sequence
-                tokenized_full = tokenizer(
-                    full_text,
-                    max_length=other_args.max_input_length, # Sesuaikan dengan total konteks
-                    padding=padding,
-                    truncation=True,
-                    add_special_tokens=True
-                )
-                
-                # Tokenisasi hanya prompt untuk mendapatkan panjangnya
-                tokenized_prompt = tokenizer(
+                tokenized_src = tokenizer(
                     full_prompt,
-                    max_length=other_args.max_input_length,
+                    max_length=max_src,
                     truncation=True,
                     add_special_tokens=True
-                )
+                )["input_ids"]
+            
+                # 2. Tokenisasi Output (Tanpa Padding)
+                tokenized_tgt = tokenizer(
+                    targets[i] + tokenizer.eos_token,
+                    max_length=max_tgt,
+                    truncation=True,
+                    add_special_tokens=False
+                )["input_ids"]
+            
+                # --- PROSES PADDING ---
+            
+                # A. Input Block: Left Padding
+                # [PAD, PAD, ..., Prompt, Dialogue]
+                num_pad_src = max_src - len(tokenized_src)
+                src_block = ([tokenizer.pad_token_id] * num_pad_src) + tokenized_src
+                src_mask = ([0] * num_pad_src) + ([1] * len(tokenized_src))
+            
+                # B. Output Block: Right Padding
+                # [Summary, EOS, PAD, PAD, ...]
+                num_pad_tgt = max_tgt - len(tokenized_tgt)
+                tgt_block = tokenized_tgt + ([tokenizer.pad_token_id] * num_pad_tgt)
+                tgt_mask = ([1] * len(tokenized_tgt)) + ([0] * num_pad_tgt)
+            
+                # --- PENGGABUNGAN ---
+            
+                # Gabungkan menjadi satu sequence utuh
+                input_ids = src_block + tgt_block
+                attention_mask = src_mask + tgt_mask
                 
-                input_ids = tokenized_full["input_ids"]
-                label_ids = list(input_ids) # Copy input_ids
-                
-                # Masking bagian prompt dengan -100
-                prompt_len = len(tokenized_prompt["input_ids"])
-                
-                # Pastikan tidak melebihi panjang total jika terjadi truncation
-                mask_limit = min(prompt_len, len(input_ids))
-                for j in range(mask_limit):
-                    label_ids[j] = -100
-                    
+                # Labels: Seluruh blok input adalah -100, 
+                # di blok output hanya Summary yang asli, sisanya (pad) adalah -100
+                labels = ([-100] * max_src) + tokenized_tgt + ([-100] * num_pad_tgt)
+
                 all_input_ids.append(input_ids)
-                all_labels.append(label_ids)
-                
+                all_labels.append(labels)
+                all_attention_masks.append(attention_mask)
+            
             return {
                 "input_ids": all_input_ids,
                 "labels": all_labels,
-                "attention_mask": [[1] * len(ids) for ids in all_input_ids]
+                "attention_mask": all_attention_masks
             }
 
     data_files = {}
@@ -232,7 +270,7 @@ def main():
     # model = PegasusForContrastive.from_pretrained('google/pegasus-large')
     # tokenizer = PegasusTokenizerFast.from_pretrained('google/pegasus-large')
 
-    data_collator = DataCollatorForContrastive(tokenizer, model=model, is_decoder_only=(not model.config.is_encoder_decoder))
+    data_collator = DataCollatorForContrastive(tokenizer, model=model, is_decoder_only=(not model.config.is_encoder_decoder), max_length=other_args.max_source_length, max_tgt=other_args.max_target_length)
 
     label_pad_token_id = -100 if other_args.ignore_pad_token_for_loss else tokenizer.pad_token_id
     if model.config.is_encoder_decoder:
@@ -243,10 +281,7 @@ def main():
             pad_to_multiple_of=8 if training_args.fp16 else None,
         )
     else:
-        data_collator_for_val_test = DataCollatorForLanguageModeling(
-            tokenizer=tokenizer,
-            mlm=False  # WAJIB untuk causal LM
-        )
+        data_collator_for_val_test = default_data_collator
     metric = evaluate.load("rouge")
 
     def postprocess_text(preds, labels):
@@ -261,28 +296,55 @@ def main():
 
     def compute_metrics(eval_preds):
         preds, labels = eval_preds
+    
+        import numpy as np
+    
+        # Handle tuple output (kadang dari Trainer)
         if isinstance(preds, tuple):
             preds = preds[0]
-        decoded_preds = tokenizer.batch_decode(preds, skip_special_tokens=True)
+    
+        # =========================
+        # 1. HANDLE SHAPE (2D vs 3D)
+        # =========================
+        # (batch, num_candidates, seq_len) → flatten
+        if preds.ndim == 3:
+            preds = preds.reshape(-1, preds.shape[-1])
+    
+        if labels.ndim == 3:
+            labels = labels.reshape(-1, labels.shape[-1])
+    
+        # =========================
+        # 2. HANDLE LABEL MASKING
+        # =========================
         if other_args.ignore_pad_token_for_loss:
-            # Replace -100 in the labels as we can't decode them.
+            preds = np.where(preds != -100, preds, tokenizer.pad_token_id)
             labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
+    
+        # =========================
+        # 3. DECODE
+        # =========================
+
+        decoded_preds = tokenizer.batch_decode(preds, skip_special_tokens=True)
         decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
-
-        # Some simple post-processing
+    
+        # =========================
+        # 4. POST-PROCESS
+        # =========================
         decoded_preds, decoded_labels = postprocess_text(decoded_preds, decoded_labels)
-
-        result = metric.compute(predictions=decoded_preds, references=decoded_labels, use_stemmer=True)
-        # Extract a few results from ROUGE
-        result = {key: value.mid.fmeasure * 100 for key, value in result.items()}
-
-        prediction_lens = [np.count_nonzero(pred != tokenizer.pad_token_id) for pred in preds]
-        result["gen_len"] = np.mean(prediction_lens)
-        result = {k: round(v, 4) for k, v in result.items()}
+    
+        # =========================
+        # 5. METRIC (ROUGE)
+        # =========================
+        result = metric.compute(
+            predictions=decoded_preds,
+            references=decoded_labels,
+            use_stemmer=True
+        )
+    
         return result
 
     # log lm_loss, contrast_loss and total_loss in wandb
-    wandb_callback = ContrastWandbCallback()
+    wandb_callback = None
 
     if model.config.is_encoder_decoder:
         trainer = ContrastiveTrainer(
@@ -290,13 +352,13 @@ def main():
             args=training_args,
             train_dataset=train_dataset,
             theta=other_args.theta,
-            eval_dataset=valid_dataset,  # monitor ROUGE
-            ori_validation_dataset=ori_validation_dataset,  # we generate summaries on the original validation set
-            test_dataset=test_dataset,
+            # eval_dataset=valid_dataset,  # monitor ROUGE
+            # ori_validation_dataset=ori_validation_dataset,  # we generate summaries on the original validation set
+            # test_dataset=test_dataset,
             data_collator=data_collator,
             data_collator_for_val_test=data_collator_for_val_test,
             tokenizer=tokenizer,
-            callbacks=[wandb_callback],
+            # callbacks=[wandb_callback],
             compute_metrics=compute_metrics if training_args.predict_with_generate else None,
             ori_dev_test_batch_size=other_args.ori_dev_test_batch_size
         )
@@ -306,13 +368,13 @@ def main():
             args=training_args,
             train_dataset=train_dataset,
             theta=other_args.theta,
-            eval_dataset=valid_dataset,  # monitor ROUGE
-            ori_validation_dataset=ori_validation_dataset,  # we generate summaries on the original validation set
-            test_dataset=test_dataset,
+            # eval_dataset=valid_dataset,  # monitor ROUGE
+            # ori_validation_dataset=ori_validation_dataset,  # we generate summaries on the original validation set
+            # test_dataset=test_dataset,
             data_collator=data_collator,
             data_collator_for_val_test=data_collator_for_val_test,
             tokenizer=tokenizer,
-            callbacks=[wandb_callback],
+            # callbacks=[wandb_callback],
             compute_metrics=compute_metrics if training_args.predict_with_generate else None,
             ori_dev_test_batch_size=other_args.ori_dev_test_batch_size
         )

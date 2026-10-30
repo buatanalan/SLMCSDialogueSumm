@@ -1,0 +1,5 @@
+technique : finetuning.yaml
+model : 
+    name_or_path: Qwen/qwen2.5-0.5B
+output_name : qwen_5_warmup
+num_train_epochs : 20

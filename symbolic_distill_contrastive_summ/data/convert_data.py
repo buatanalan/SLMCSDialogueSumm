@@ -35,6 +35,7 @@ def convert_jsonl_to_json(input_file, output_file):
 if __name__ == "__main__":
     argparser = argparse.ArgumentParser(description="Convert data to required format for training.")
     argparser.add_argument("--input_file", type=str, required=True, help="Path to the processed dialogues file (CSV or JSON).")
+    argparser.add_argument("--output_file", type=str, required=True, help="Path to the processed dialogues file (CSV or JSON).")
     args = argparser.parse_args()
 
-    convert_jsonl_to_json(args.input_file, f"data/{args.input_file.split('/')[-1].split('.')[0]}.json")
+    convert_jsonl_to_json(args.input_file, f"data/{args.output_file}")

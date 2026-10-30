@@ -1,0 +1,5 @@
+technique : finetuning.yaml
+model : 
+    name_or_path: facebook/bart-base
+output_name : bart_warmup
+num_train_epochs : 10

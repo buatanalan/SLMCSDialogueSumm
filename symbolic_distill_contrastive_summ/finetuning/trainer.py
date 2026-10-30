@@ -36,7 +36,7 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
             data_collator=data_collator,
             train_dataset=train_dataset,
             eval_dataset=eval_dataset,
-            tokenizer=tokenizer,
+            # tokenizer=tokenizer,
             model_init=model_init,
             compute_metrics=compute_metrics,
             callbacks=callbacks,
@@ -44,7 +44,10 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
             preprocess_logits_for_metrics=preprocess_logits_for_metrics,
         )
 
+        # self.tokenizer = tokenizer
+
         self.test_dataset = test_dataset
+        self.tokenizer = tokenizer
 
         # Override self.model.generation_config if a GenerationConfig is specified in args.
         # Priority: args.generation_config > model.generation_config > default GenerationConfig.
@@ -52,6 +55,22 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
             gen_config = self.load_generation_config(self.args.generation_config)
             self.model.generation_config = gen_config
 
+    # def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+    #     loss = super().compute_loss(model, inputs, return_outputs, **kwargs)
+    #     print(loss)
+    #     return loss
+    # def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+    #     outputs = super().compute_loss(
+    #         model, inputs,
+    #         return_outputs=return_outputs,
+    #         num_items_in_batch=num_items_in_batch,
+    #     )
+    #     # outputs bisa berupa loss (tensor) atau (loss, outputs) tuple
+    #     loss = outputs[0] if isinstance(outputs, tuple) else outputs
+    #     print("loss:", loss.item() if loss is not None else None)
+    #     return outputs   # WAJIB kembalikan bentuk asli, bukan loss saja
+    
+    
     def evaluate(
         self,
         eval_dataset: Optional[Dataset] = None,
@@ -97,7 +116,7 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
         eval_dataloader = self.get_eval_dataloader(eval_dataset)
         start_time = time.time()
 
-        eval_loop = self.prediction_loop if self.args.use_legacy_prediction_loop else self.evaluation_loop
+        eval_loop =  self.evaluation_loop
         output = eval_loop(
             eval_dataloader,
             description="Evaluation",
@@ -194,7 +213,7 @@ class CustomCausalLMTrainer(Trainer):
             data_collator=data_collator,
             train_dataset=train_dataset,
             eval_dataset=eval_dataset,
-            tokenizer=tokenizer,
+            # tokenizer=tokenizer,
             model_init=model_init,
             compute_metrics=compute_metrics,
             callbacks=callbacks,
@@ -203,6 +222,7 @@ class CustomCausalLMTrainer(Trainer):
         )
 
         self.test_dataset = test_dataset
+        self.tokenizer = tokenizer
 
         # Override self.model.generation_config if a GenerationConfig is specified in args.
         # Priority: args.generation_config > model.generation_config > default GenerationConfig.
@@ -251,13 +271,12 @@ class CustomCausalLMTrainer(Trainer):
 
         # memory metrics - must set up as early as possible
         self._memory_tracker.start()
-        print("ini evaluation\n\n\n\n")
-        print(eval_dataset)
 
-        eval_dataloader = self.get_eval_dataloader(eval_dataset)
+        eval_dataloader = self.get_eval_dataloader(self.eval_dataset)
         start_time = time.time()
 
-        eval_loop = self.prediction_loop if self.args.use_legacy_prediction_loop else self.evaluation_loop
+        # eval_loop = self.prediction_loop if self.args.use_legacy_prediction_loop else self.evaluation_loop
+        eval_loop = self.evaluation_loop
         output = eval_loop(
             eval_dataloader,
             description="Evaluation",
@@ -282,6 +301,10 @@ class CustomCausalLMTrainer(Trainer):
 
         self.log(output.metrics)
 
+        torch.cuda.empty_cache() # Tambahkan ini
+        import gc
+        gc.collect() # Tambahkan ini
+
         # if DebugOption.TPU_METRICS_DEBUG in self.args.debug:
         #     # tpu-comment: Logging debug metrics for PyTorch/XLA (compile, execute times, ops, etc.)
         #     xm.master_print(met.metrics_report())
@@ -294,11 +317,37 @@ class CustomCausalLMTrainer(Trainer):
         summary_file = os.path.join(self.args.output_dir, f"STEP-{self.state.global_step}_generated_summaries.json")
         # Replace -100s used for padding as we can't decode them
         preds = output.predictions
+        print(preds.shape)
+        labels = output.label_ids
         if len(preds.shape) == 3:
             preds = np.argmax(preds, axis=-1)
         tokenizer = self.tokenizer
-        preds = np.where(preds != -100, preds, tokenizer.pad_token_id)
-        decoded_preds = tokenizer.batch_decode(preds, skip_special_tokens=True)
+        ignore_id = -100 
+
+        # 2. Ambil hanya bagian yang merupakan "Jawaban"
+        cleaned_preds = []
+    
+        for i in range(len(labels)):
+            # Filter: ambil indeks yang labels-nya bukan ID padding
+            target_indices = np.where(labels[i] != -100)[0]
+    
+            if len(target_indices) > 0:
+                first_idx = target_indices[0]
+                last_idx = target_indices[-1]
+                
+                # 2. Ambil PREDS mulai dari (indeks_pertama - 1) sampai (indeks_terakhir - 1)
+                # Karena pred[t] adalah untuk label[t+1]
+                
+                if len(preds[i] > 1):
+                    actual_pred = preds[i][first_idx-1 : last_idx]
+                else:
+                    actual_pred = preds[i][0][first_idx-1 : last_idx]
+
+                    
+            cleaned_preds.append(actual_pred)
+
+        # 3. Decode ke teks
+        decoded_preds = tokenizer.batch_decode(cleaned_preds, skip_special_tokens=True)
 
         # post process
         decoded_preds = [pred.strip().replace("\n", " ") for pred in decoded_preds]  # ensure no newline char in output
@@ -325,13 +374,46 @@ class CustomCausalLMTrainer(Trainer):
         if len(test_preds.shape) == 3:
             test_preds = np.argmax(test_preds, axis=-1)
         tokenizer = self.tokenizer
-        test_preds = np.where(test_preds != -100, test_preds, tokenizer.pad_token_id)
-        test_decoded_preds = tokenizer.batch_decode(test_preds, skip_special_tokens=True)
+        test_labels = test_output.label_ids
+        
+        tokenizer = self.tokenizer
+        ignore_id = -100 
+
+        # 2. Ambil hanya bagian yang merupakan "Jawaban"
+        test_cleaned_preds = []
+    
+        for i in range(len(labels)):
+            # Filter: ambil indeks yang labels-nya bukan ID padding
+            target_indices = np.where(test_labels[i] != -100)[0]
+    
+            if len(target_indices) > 0:
+                first_idx = target_indices[0]
+                last_idx = target_indices[-1]
+                
+                # 2. Ambil PREDS mulai dari (indeks_pertama - 1) sampai (indeks_terakhir - 1)
+                # Karena pred[t] adalah untuk label[t+1]
+                
+                if len(preds[i] > 1):
+                    actual_pred = test_preds[i][first_idx-1 : last_idx]
+                else:
+                    actual_pred = test_preds[i][0][first_idx-1 : last_idx]
+
+            # Ambil token asli & prediksi pada posisi mask tersebut            
+            test_cleaned_preds.append(actual_pred)
+
+        # 3. Decode ke teks
+        test_decoded_preds = tokenizer.batch_decode(test_cleaned_preds, skip_special_tokens=True)
 
         # post process
         test_decoded_preds = [pred.strip().replace("\n", " ") for pred in test_decoded_preds]  # ensure no newline char in output
         # preds = ["\n".join(nltk.sent_tokenize(pred)) for pred in decoded_preds]
         with open(test_summary_file, "w") as file:
             json.dump(test_decoded_preds, file, indent=4)
+
+        self.log(test_output.metrics)
+
+        torch.cuda.empty_cache() # Tambahkan ini
+        import gc
+        gc.collect() # Tambahkan ini
 
         return output.metrics
